@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Perrongskylt Simulator</title>
+<style>
+:root{color-scheme:dark;--bg:#11130f;--edge:#343a2c;--ink:#e5e7dd;--muted:#9a9e8e;--amber:#ff9a24;--green:#9dc36b;--red:#e0735a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 "Trebuchet MS",sans-serif}
+main{max-width:980px;margin:0 auto;padding:28px 16px 44px}
+.eyebrow{color:var(--amber);font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px}
+h1{font-size:26px;margin:4px 0 4px}
+.sub{color:var(--muted);font-size:13px;margin:0 0 20px}
+.housing{background:#050605;border:1px solid #303328;border-radius:6px;padding:14px}
+canvas{display:block;width:100%;height:auto;image-rendering:pixelated}
+.statusbar{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13px;color:var(--muted);margin:10px 0 22px}
+.ok{color:var(--green)}.bad{color:var(--red)}
+form{display:grid;grid-template-columns:1fr 1fr;gap:14px 18px}
+.field{display:flex;flex-direction:column;gap:6px}.wide{grid-column:1/-1}
+label{font-size:13px;color:var(--muted)}
+input,select{width:100%;min-height:42px;border:1px solid var(--edge);border-radius:3px;background:#10120f;color:var(--ink);padding:8px 10px;font:inherit}
+input[type=range]{padding:0;accent-color:var(--amber)}
+.help{font-size:12px;color:var(--muted)}
+h2{font-size:15px;color:var(--amber);text-transform:uppercase;letter-spacing:1px;margin:30px 0 12px}
+.buttons{display:flex;flex-wrap:wrap;gap:10px}
+button{min-height:42px;border:1px solid var(--edge);border-radius:3px;background:#1b1e18;color:var(--ink);font:inherit;font-size:14px;padding:0 14px;cursor:pointer}
+button.primary{background:var(--amber);border-color:var(--amber);color:#17130b;font-weight:700}
+button[aria-pressed=true]{border-color:var(--red);color:var(--red)}
+pre{background:#0b0c0a;border:1px solid var(--edge);padding:10px;font-size:12px;color:var(--muted);max-height:180px;overflow:auto;margin:0;white-space:pre-wrap}
+.topbar{display:flex;justify-content:space-between;align-items:end;gap:12px}
+#lang{width:auto;min-height:34px;padding:4px 8px;font-size:13px}
+.warn{color:#e0b05a}
+@media(max-width:560px){form{grid-template-columns:1fr}.wide{grid-column:auto}.topbar{flex-direction:column;align-items:start}}
+</style>
+</head>
+<body>
+<main>
+<div class="topbar">
+  <div><div class="eyebrow">Stockholm · Tunnelbana · Simulator</div><h1 data-t="title"></h1></div>
+  <select id="lang" aria-label="Språk / Language / Idioma"><option value="sv">Svenska</option><option value="en">English</option><option value="es">Español</option></select>
+</div>
+<p class="sub" data-t="sub"></p>
+
+<div class="housing"><canvas id="panel" width="768" height="192"></canvas></div>
+<div class="statusbar">
+  <span id="fetchStatus"></span>
+  <span id="lastFetch"></span>
+  <span id="nextFetch"></span>
+</div>
+
+<h2 data-t="hDisplay"></h2>
+<form id="display">
+  <div class="field wide"><label for="site" data-t="station"></label><select id="site"></select><span class="help" data-t="stationHelp"></span></div>
+  <div class="field"><label for="platform" data-t="platform"></label><select id="platform"></select><span class="help" data-t="platformHelp"></span><span class="help warn" id="platformWarn"></span></div>
+  <div class="field"><label for="line" data-t="line"></label><select id="line"></select><span class="help" data-t="lineHelp"></span></div>
+  <div class="field"><label for="rows" data-t="rows"></label><select id="rows"><option value="1" data-t="row1"></option><option value="2" data-t="row2" selected></option></select><span class="help" data-t="rowsHelp"></span></div>
+  <div class="field"><label for="brightness"><span data-t="brightness"></span> · <output id="brightnessValue">64</output>/255</label><input id="brightness" type="range" min="1" max="255" value="64"><span class="help" data-t="brightnessHelp"></span></div>
+</form>
+
+<h2 data-t="hTest"></h2>
+<div class="buttons">
+  <button type="button" class="primary" id="fetchNow" data-t="fetchNow"></button>
+  <button type="button" id="offline" aria-pressed="false"></button>
+  <button type="button" id="skip" data-t="skip"></button>
+</div>
+
+<h2 data-t="hLog"></h2>
+<pre id="log"></pre>
+</main>
+
+<script>
+// ---- Same constants as src/main.cpp and src/StockholmTheme.cpp ----
+const PANEL_W = 128, PANEL_H = 32, CHAR_W = 6, ROW_H = 16;
+const POLL_MS = 25000, STALE_MS = 180000;
+const AMBER = [255, 142, 24];  // color565(255, 142, 24) after RGB565 rounding
+const LED = 6;                 // canvas pixels per LED
+
+// Adafruit GFX glcdfont.c (5x7, CP437), copied from .pio/libdeps.
+const FONT = [
+  0x00,0x00,0x00,0x00,0x00,0x3E,0x5B,0x4F,0x5B,0x3E,0x3E,0x6B,0x4F,0x6B,0x3E,0x1C,0x3E,0x7C,0x3E,0x1C,
+  0x18,0x3C,0x7E,0x3C,0x18,0x1C,0x57,0x7D,0x57,0x1C,0x1C,0x5E,0x7F,0x5E,0x1C,0x00,0x18,0x3C,0x18,0x00,
+  0xFF,0xE7,0xC3,0xE7,0xFF,0x00,0x18,0x24,0x18,0x00,0xFF,0xE7,0xDB,0xE7,0xFF,0x30,0x48,0x3A,0x06,0x0E,
+  0x26,0x29,0x79,0x29,0x26,0x40,0x7F,0x05,0x05,0x07,0x40,0x7F,0x05,0x25,0x3F,0x5A,0x3C,0xE7,0x3C,0x5A,
+  0x7F,0x3E,0x1C,0x1C,0x08,0x08,0x1C,0x1C,0x3E,0x7F,0x14,0x22,0x7F,0x22,0x14,0x5F,0x5F,0x00,0x5F,0x5F,
+  0x06,0x09,0x7F,0x01,0x7F,0x00,0x66,0x89,0x95,0x6A,0x60,0x60,0x60,0x60,0x60,0x94,0xA2,0xFF,0xA2,0x94,
+  0x08,0x04,0x7E,0x04,0x08,0x10,0x20,0x7E,0x20,0x10,0x08,0x08,0x2A,0x1C,0x08,0x08,0x1C,0x2A,0x08,0x08,
+  0x1E,0x10,0x10,0x10,0x10,0x0C,0x1E,0x0C,0x1E,0x0C,0x30,0x38,0x3E,0x38,0x30,0x06,0x0E,0x3E,0x0E,0x06,
+  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x5F,0x00,0x00,0x00,0x07,0x00,0x07,0x00,0x14,0x7F,0x14,0x7F,0x14,
+  0x24,0x2A,0x7F,0x2A,0x12,0x23,0x13,0x08,0x64,0x62,0x36,0x49,0x56,0x20,0x50,0x00,0x08,0x07,0x03,0x00,
+  0x00,0x1C,0x22,0x41,0x00,0x00,0x41,0x22,0x1C,0x00,0x2A,0x1C,0x7F,0x1C,0x2A,0x08,0x08,0x3E,0x08,0x08,
+  0x00,0x80,0x70,0x30,0x00,0x08,0x08,0x08,0x08,0x08,0x00,0x00,0x60,0x60,0x00,0x20,0x10,0x08,0x04,0x02,
+  0x3E,0x51,0x49,0x45,0x3E,0x00,0x42,0x7F,0x40,0x00,0x72,0x49,0x49,0x49,0x46,0x21,0x41,0x49,0x4D,0x33,
+  0x18,0x14,0x12,0x7F,0x10,0x27,0x45,0x45,0x45,0x39,0x3C,0x4A,0x49,0x49,0x31,0x41,0x21,0x11,0x09,0x07,
+  0x36,0x49,0x49,0x49,0x36,0x46,0x49,0x49,0x29,0x1E,0x00,0x00,0x14,0x00,0x00,0x00,0x40,0x34,0x00,0x00,
+  0x00,0x08,0x14,0x22,0x41,0x14,0x14,0x14,0x14,0x14,0x00,0x41,0x22,0x14,0x08,0x02,0x01,0x59,0x09,0x06,
+  0x3E,0x41,0x5D,0x59,0x4E,0x7C,0x12,0x11,0x12,0x7C,0x7F,0x49,0x49,0x49,0x36,0x3E,0x41,0x41,0x41,0x22,
+  0x7F,0x41,0x41,0x41,0x3E,0x7F,0x49,0x49,0x49,0x41,0x7F,0x09,0x09,0x09,0x01,0x3E,0x41,0x41,0x51,0x73,
+  0x7F,0x08,0x08,0x08,0x7F,0x00,0x41,0x7F,0x41,0x00,0x20,0x40,0x41,0x3F,0x01,0x7F,0x08,0x14,0x22,0x41,
+  0x7F,0x40,0x40,0x40,0x40,0x7F,0x02,0x1C,0x02,0x7F,0x7F,0x04,0x08,0x10,0x7F,0x3E,0x41,0x41,0x41,0x3E,
+  0x7F,0x09,0x09,0x09,0x06,0x3E,0x41,0x51,0x21,0x5E,0x7F,0x09,0x19,0x29,0x46,0x26,0x49,0x49,0x49,0x32,
+  0x03,0x01,0x7F,0x01,0x03,0x3F,0x40,0x40,0x40,0x3F,0x1F,0x20,0x40,0x20,0x1F,0x3F,0x40,0x38,0x40,0x3F,
+  0x63,0x14,0x08,0x14,0x63,0x03,0x04,0x78,0x04,0x03,0x61,0x59,0x49,0x4D,0x43,0x00,0x7F,0x41,0x41,0x41,
+  0x02,0x04,0x08,0x10,0x20,0x00,0x41,0x41,0x41,0x7F,0x04,0x02,0x01,0x02,0x04,0x40,0x40,0x40,0x40,0x40,
+  0x00,0x03,0x07,0x08,0x00,0x20,0x54,0x54,0x78,0x40,0x7F,0x28,0x44,0x44,0x38,0x38,0x44,0x44,0x44,0x28,
+  0x38,0x44,0x44,0x28,0x7F,0x38,0x54,0x54,0x54,0x18,0x00,0x08,0x7E,0x09,0x02,0x18,0xA4,0xA4,0x9C,0x78,
+  0x7F,0x08,0x04,0x04,0x78,0x00,0x44,0x7D,0x40,0x00,0x20,0x40,0x40,0x3D,0x00,0x7F,0x10,0x28,0x44,0x00,
+  0x00,0x41,0x7F,0x40,0x00,0x7C,0x04,0x78,0x04,0x78,0x7C,0x08,0x04,0x04,0x78,0x38,0x44,0x44,0x44,0x38,
+  0xFC,0x18,0x24,0x24,0x18,0x18,0x24,0x24,0x18,0xFC,0x7C,0x08,0x04,0x04,0x08,0x48,0x54,0x54,0x54,0x24,
+  0x04,0x04,0x3F,0x44,0x24,0x3C,0x40,0x40,0x20,0x7C,0x1C,0x20,0x40,0x20,0x1C,0x3C,0x40,0x30,0x40,0x3C,
+  0x44,0x28,0x10,0x28,0x44,0x4C,0x90,0x90,0x90,0x7C,0x44,0x64,0x54,0x4C,0x44,0x00,0x08,0x36,0x41,0x00,
+  0x00,0x00,0x77,0x00,0x00,0x00,0x41,0x36,0x08,0x00,0x02,0x01,0x02,0x04,0x02,0x3C,0x26,0x23,0x26,0x3C,
+  0x1E,0xA1,0xA1,0x61,0x12,0x3A,0x40,0x40,0x20,0x7A,0x38,0x54,0x54,0x55,0x59,0x21,0x55,0x55,0x79,0x41,
+  0x22,0x54,0x54,0x78,0x42,0x21,0x55,0x54,0x78,0x40,0x20,0x54,0x55,0x79,0x40,0x0C,0x1E,0x52,0x72,0x12,
+  0x39,0x55,0x55,0x55,0x59,0x39,0x54,0x54,0x54,0x59,0x39,0x55,0x54,0x54,0x58,0x00,0x00,0x45,0x7C,0x41,
+  0x00,0x02,0x45,0x7D,0x42,0x00,0x01,0x45,0x7C,0x40,0x7D,0x12,0x11,0x12,0x7D,0xF0,0x28,0x25,0x28,0xF0,
+  0x7C,0x54,0x55,0x45,0x00,0x20,0x54,0x54,0x7C,0x54,0x7C,0x0A,0x09,0x7F,0x49,0x32,0x49,0x49,0x49,0x32,
+  0x3A,0x44,0x44,0x44,0x3A,0x32,0x4A,0x48,0x48,0x30,0x3A,0x41,0x41,0x21,0x7A,0x3A,0x42,0x40,0x20,0x78,
+  0x00,0x9D,0xA0,0xA0,0x7D,0x3D,0x42,0x42,0x42,0x3D,0x3D,0x40,0x40,0x40,0x3D,0x3C,0x24,0xFF,0x24,0x24,
+  0x48,0x7E,0x49,0x43,0x66,0x2B,0x2F,0xFC,0x2F,0x2B,0xFF,0x09,0x29,0xF6,0x20,0xC0,0x88,0x7E,0x09,0x03,
+  0x20,0x54,0x54,0x79,0x41,0x00,0x00,0x44,0x7D,0x41,0x30,0x48,0x48,0x4A,0x32,0x38,0x40,0x40,0x22,0x7A,
+  0x00,0x7A,0x0A,0x0A,0x72,0x7D,0x0D,0x19,0x31,0x7D,0x26,0x29,0x29,0x2F,0x28,0x26,0x29,0x29,0x29,0x26,
+  0x30,0x48,0x4D,0x40,0x20,0x38,0x08,0x08,0x08,0x08,0x08,0x08,0x08,0x08,0x38,0x2F,0x10,0xC8,0xAC,0xBA,
+  0x2F,0x10,0x28,0x34,0xFA,0x00,0x00,0x7B,0x00,0x00,0x08,0x14,0x2A,0x14,0x22,0x22,0x14,0x2A,0x14,0x08,
+  0x55,0x00,0x55,0x00,0x55,0xAA,0x55,0xAA,0x55,0xAA,0xFF,0x55,0xFF,0x55,0xFF,0x00,0x00,0x00,0xFF,0x00,
+  0x10,0x10,0x10,0xFF,0x00,0x14,0x14,0x14,0xFF,0x00,0x10,0x10,0xFF,0x00,0xFF,0x10,0x10,0xF0,0x10,0xF0,
+  0x14,0x14,0x14,0xFC,0x00,0x14,0x14,0xF7,0x00,0xFF,0x00,0x00,0xFF,0x00,0xFF,0x14,0x14,0xF4,0x04,0xFC,
+  0x14,0x14,0x17,0x10,0x1F,0x10,0x10,0x1F,0x10,0x1F,0x14,0x14,0x14,0x1F,0x00,0x10,0x10,0x10,0xF0,0x00,
+  0x00,0x00,0x00,0x1F,0x10,0x10,0x10,0x10,0x1F,0x10,0x10,0x10,0x10,0xF0,0x10,0x00,0x00,0x00,0xFF,0x10,
+  0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x10,0xFF,0x10,0x00,0x00,0x00,0xFF,0x14,0x00,0x00,0xFF,0x00,0xFF,
+  0x00,0x00,0x1F,0x10,0x17,0x00,0x00,0xFC,0x04,0xF4,0x14,0x14,0x17,0x10,0x17,0x14,0x14,0xF4,0x04,0xF4,
+  0x00,0x00,0xFF,0x00,0xF7,0x14,0x14,0x14,0x14,0x14,0x14,0x14,0xF7,0x00,0xF7,0x14,0x14,0x14,0x17,0x14,
+  0x10,0x10,0x1F,0x10,0x1F,0x14,0x14,0x14,0xF4,0x14,0x10,0x10,0xF0,0x10,0xF0,0x00,0x00,0x1F,0x10,0x1F,
+  0x00,0x00,0x00,0x1F,0x14,0x00,0x00,0x00,0xFC,0x14,0x00,0x00,0xF0,0x10,0xF0,0x10,0x10,0xFF,0x10,0xFF,
+  0x14,0x14,0x14,0xFF,0x14,0x10,0x10,0x10,0x1F,0x00,0x00,0x00,0x00,0xF0,0x10,0xFF,0xFF,0xFF,0xFF,0xFF,
+  0xF0,0xF0,0xF0,0xF0,0xF0,0xFF,0xFF,0xFF,0x00,0x00,0x00,0x00,0x00,0xFF,0xFF,0x0F,0x0F,0x0F,0x0F,0x0F,
+  0x38,0x44,0x44,0x38,0x44,0xFC,0x4A,0x4A,0x4A,0x34,0x7E,0x02,0x02,0x06,0x06,0x02,0x7E,0x02,0x7E,0x02,
+  0x63,0x55,0x49,0x41,0x63,0x38,0x44,0x44,0x3C,0x04,0x40,0x7E,0x20,0x1E,0x20,0x06,0x02,0x7E,0x02,0x02,
+  0x99,0xA5,0xE7,0xA5,0x99,0x1C,0x2A,0x49,0x2A,0x1C,0x4C,0x72,0x01,0x72,0x4C,0x30,0x4A,0x4D,0x4D,0x30,
+  0x30,0x48,0x78,0x48,0x30,0xBC,0x62,0x5A,0x46,0x3D,0x3E,0x49,0x49,0x49,0x00,0x7E,0x01,0x01,0x01,0x7E,
+  0x2A,0x2A,0x2A,0x2A,0x2A,0x44,0x44,0x5F,0x44,0x44,0x40,0x51,0x4A,0x44,0x40,0x40,0x44,0x4A,0x51,0x40,
+  0x00,0x00,0xFF,0x01,0x03,0xE0,0x80,0xFF,0x00,0x00,0x08,0x08,0x6B,0x6B,0x08,0x36,0x12,0x36,0x24,0x36,
+  0x06,0x0F,0x09,0x0F,0x06,0x00,0x00,0x18,0x18,0x00,0x00,0x00,0x10,0x10,0x00,0x30,0x40,0xFF,0x01,0x01,
+  0x00,0x1F,0x01,0x01,0x1E,0x00,0x19,0x1D,0x17,0x12,0x00,0x3C,0x3C,0x3C,0x3C,0x00,0x00,0x00,0x00,0x00
+];
+
+const STATIONS = '9110|Abrahamsberg;9300|Akalla;9108|Åkeshov;9282|Alby;9112|Alvik;9107|Ängbyplan;9312|Arenastaden;9293|Aspudden;9291|Axelsberg;9141|Bagarmossen;9163|Bandhagen;9308|Barkarbystaden;9202|Bergshamra;9143|Björkhagen;9105|Blackeberg;9187|Blåsut;9289|Bredäng;9109|Brommaplan;9201|Danderyds sjukhus;9324|Duvbo;9167|Enskede gård;9181|Farsta;9180|Farsta strand;9283|Fittja;9115|Fridhemsplan;9260|Fruängen;9193|Gamla stan;9221|Gärdet;9168|Globen;9183|Gubbängen;9189|Gullmarsplan;9311|Hagalund;9310|Hagastaden;9262|Hägerstensåsen;9160|Hagsätra;9303|Hallonbergen;9281|Hallunda;9144|Hammarbyhöjden;9101|Hässelby gård;9100|Hässelby strand;9320|Hjulsta;9162|Högdalen;9182|Hökarängen;9295|Hornstull;9119|Hötorget;9301|Husby;9327|Huvudsta;9106|Islandstorget;9102|Johannelund;9222|Karlaplan;9142|Kärrtorp;9302|Kista;9113|Kristineberg;9340|Kungsträdgården;9294|Liljeholmen;9290|Mälarhöjden;9297|Mariatorget;9284|Masmo;9191|Medborgarplatsen;9264|Midsommarkransen;9200|Mörby centrum;9304|Näckrosen;9280|Norsborg;9117|Odenplan;9292|Örnsberg;9206|Östermalmstorg;9104|Råcksta;9309|Rådhuset;9118|Rådmansgatan;9161|Rågsved;9322|Rinkeby;9323|Rissne;9220|Ropsten;9186|Sandsborg;9116|Sankt Eriksplan;9288|Sätra;9190|Skanstull;9287|Skärholmen;9188|Skärmarbrink;9140|Skarpnäck;9185|Skogskyrkogården;9192|Slussen;9166|Sockenplan;9305|Solna centrum;9326|Solna strand;9205|Stadion;9307|Stadshagen;9111|Stora mossen;9164|Stureby;9325|Sundbyberg;9165|Svedmyra;9184|Tallkrogen;9001|T-Centralen;9204|Tekniska högskolan;9263|Telefonplan;9321|Tensta;9114|Thorildsplan;9203|Universitetet;9103|Vällingby;9286|Vårberg;9285|Vårby gård;9261|Västertorp;9306|Västra skogen;9296|Zinkensdamm';
+
+const $ = id => document.getElementById(id);
+const ctx = $('panel').getContext('2d');
+
+const config = { site: 9116, platform: '2', line: '', rows: 2, brightness: 64 };
+let stopData = { departures: [], stopName: '' };
+let lastFetchOk = false, lastFetchMs = 0, lastSuccessMs = 0, clockOffset = 0;
+let offline = false, platforms = [];
+
+const now = () => Date.now() + clockOffset;
+function log(msg) {
+  const t = new Date().toLocaleTimeString('sv-SE');
+  $('log').textContent = `[${t}] ${msg}\n` + $('log').textContent;
+}
+
+// ---- StockholmTheme::panelText: UTF-8 -> upper-case CP437 ----
+const CP437 = { 'Å': 0x8F, 'å': 0x8F, 'Ä': 0x8E, 'ä': 0x8E, 'Ö': 0x99, 'ö': 0x99,
+                'É': 0x90, 'é': 0x90, 'Ü': 0x9A, 'ü': 0x9A };
+function panelText(text) {
+  const out = [];
+  for (const ch of text) {
+    const code = ch.codePointAt(0);
+    if (code < 0x80) out.push(ch.toUpperCase().charCodeAt(0));
+    else if (CP437[ch]) out.push(CP437[ch]);
+  }
+  return out;
+}
+// ---- Framebuffer + Adafruit_GFX::drawChar at text size 1 ----
+let frame = new Uint8Array(PANEL_W * PANEL_H);
+// Optional clip window, like the GFXcanvas1 the firmware uses for marquees.
+let clip = null;
+function setPixel(px, py, value) {
+  if (px < 0 || px >= PANEL_W || py < 0 || py >= PANEL_H) return;
+  if (clip && (px < clip.x || px >= clip.x + clip.w || py < clip.y || py >= clip.y + clip.h)) return;
+  frame[py * PANEL_W + px] = value;
+}
+function drawText(x, y, codes) {
+  for (const c of codes) {
+    for (let i = 0; i < 5; i++) {
+      let bits = FONT[c * 5 + i];
+      for (let j = 0; j < 8; j++, bits >>= 1) {
+        if (bits & 1) setPixel(x + i, y + j, 1);
+      }
+    }
+    // StockholmTheme::drawText lifts the umlaut dots of Ä (0x8E) and Ö (0x99) one pixel,
+    // and lifts the whole Å (0x8F) one pixel so it sits on the same baseline as A.
+    if (c === 0x8E || c === 0x99) {
+      for (const dx of [x, x + 4]) {
+        setPixel(dx, y, 0);
+        setPixel(dx, y - 1, 1);
+      }
+    } else if (c === 0x8F) {
+      for (let i = 0; i < 5; i++) {
+        for (let j = 0; j < 8; j++) setPixel(x + i, y + j, 0);
+        for (let j = 0, bits = FONT[c * 5 + i]; j < 8; j++, bits >>= 1) if (bits & 1) setPixel(x + i, y + j - 1, 1);
+      }
+    }
+    x += CHAR_W;
+  }
+}
+
+// ---- StockholmTheme marquee: text too long for its window scrolls right-to-left ----
+const TIME_GAP = 4, MARQUEE_GAP = 3 * CHAR_W, MARQUEE_STEP_MS = 40, MARQUEE_PAUSE_MS = 2000;
+let marquees = [null, null];
+const textWidth = codes => codes.length ? codes.length * CHAR_W - 1 : 0;
+
+function placeText(x, y, width, codes, slot) {
+  if (textWidth(codes) <= width) { marquees[slot] = null; drawText(x, y, codes); return; }
+  const key = codes.join(',');
+  const old = marquees[slot];
+  const same = old && old.key === key && old.x === x && old.y === y && old.width === width;
+  if (!same) marquees[slot] = { x, y, width, codes, key, offset: 0, nextStepMs: performance.now() + MARQUEE_PAUSE_MS };
+  drawMarquee(marquees[slot]);
+}
+
+function drawMarquee(m) {
+  // Same window as the firmware's 9-row GFXcanvas1: one extra row for lifted umlaut dots.
+  clip = { x: m.x, y: m.y - 1, w: m.width, h: 9 };
+  for (let py = clip.y; py < clip.y + clip.h; py++) for (let px = clip.x; px < clip.x + clip.w; px++) setPixel(px, py, 0);
+  const cycle = textWidth(m.codes) + 1 + MARQUEE_GAP;
+  drawText(m.x - m.offset, m.y, m.codes);
+  drawText(m.x + cycle - m.offset, m.y, m.codes);
+  clip = null;
+}
+
+function animate() {
+  const t = performance.now();
+  let changed = false;
+  for (const m of marquees) {
+    if (!m || t < m.nextStepMs) continue;
+    const cycle = textWidth(m.codes) + 1 + MARQUEE_GAP;
+    m.offset = (m.offset + 1) % cycle;
+    m.nextStepMs = t + (m.offset === 0 ? MARQUEE_PAUSE_MS : MARQUEE_STEP_MS);
+    drawMarquee(m);
+    changed = true;
+  }
+  if (changed) paint();
+  requestAnimationFrame(animate);
+}
+
+// ---- StockholmTheme::render ----
+function render() {
+  frame = new Uint8Array(PANEL_W * PANEL_H);
+  const rows = Math.min(config.rows, 2);
+  const deps = stopData.departures;
+  const used = [false, false];
+
+  if (!deps.length) {
+    drawText(0, 4, panelText(lastFetchOk ? 'Väntar på tåg' : 'Ingen kontakt med SL'));
+    if (rows > 1 && stopData.stopName) { placeText(0, ROW_H + 4, PANEL_W, panelText(stopData.stopName), 1); used[1] = true; }
+  } else {
+    for (let row = 0; row < rows; row++) {
+      const y = row * ROW_H + 4;
+      if (!lastFetchOk && row === 1) { drawText(0, y, panelText('Ingen anslutning')); continue; }
+      if (row >= deps.length) continue;
+      const d = deps[row];
+      const line = panelText(d.line), time = panelText(d.displayTime);
+      const timeX = PANEL_W - time.length * CHAR_W;
+      const destX = (line.length + 1) * CHAR_W;
+      drawText(0, y, line);
+      drawText(timeX, y, time);
+      placeText(destX, y, timeX - TIME_GAP - destX, panelText(d.destination), row);
+      used[row] = true;
+    }
+  }
+  used.forEach((u, slot) => { if (!u) marquees[slot] = null; });
+  paint();
+}
+
+// Pre-rendered LED sprites keep 25 fps marquee repaints cheap.
+let sprites = null, spriteLevel = -1;
+function ledSprite(color) {
+  const c = document.createElement('canvas'); c.width = c.height = LED;
+  const g = c.getContext('2d'); g.fillStyle = '#000'; g.fillRect(0, 0, LED, LED);
+  g.fillStyle = color; g.beginPath(); g.arc(LED / 2, LED / 2, LED * 0.4, 0, Math.PI * 2); g.fill();
+  return c;
+}
+function paint() {
+  const level = 0.18 + 0.82 * (config.brightness / 255);
+  const [r, g, b] = AMBER;
+  if (!sprites || spriteLevel !== level) {
+    sprites = [ledSprite('#160d05'), ledSprite(`rgba(${r},${g},${b},${level})`)];
+    spriteLevel = level;
+  }
+  for (let y = 0; y < PANEL_H; y++) {
+    for (let x = 0; x < PANEL_W; x++) ctx.drawImage(sprites[frame[y * PANEL_W + x]], x * LED, y * LED);
+  }
+  // Seam between the two chained 64x32 panels.
+  ctx.fillStyle = '#0a0a08';
+  ctx.fillRect(64 * LED - 1, 0, 2, PANEL_H * LED);
+}
+
+// ---- SlTransportAdapter ----
+async function request(siteId) {
+  if (offline) throw new Error('Wi-Fi frånkopplat');
+  let res;
+  try {
+    res = await fetch(`https://transport.integration.sl.se/v1/sites/${siteId}/departures`);
+  } catch (e) { throw new Error('SL API ' + e.message); }
+  if (!res.ok) throw new Error('SL API HTTP ' + res.status);
+  return res.json();
+}
+
+async function fetchDepartures() {
+  const doc = await request(config.site);
+  const result = { departures: [], stopName: '' };
+  for (const item of doc.departures || []) {
+    if (!result.stopName) result.stopName = item.stop_area?.name || '';
+    if (item.line?.transport_mode !== 'METRO' || item.stop_point?.designation !== config.platform) continue;
+    if (item.state === 'CANCELLED' || item.state === 'PASSED') continue;
+    const line = item.line?.designation || '?';
+    if (config.line && line !== config.line) continue;
+    result.departures.push({ line, destination: item.destination || 'Okänd', displayTime: item.display || '-- min' });
+  }
+  return result;
+}
+
+async function fetchPlatforms(siteId) {
+  const doc = await request(siteId);
+  const map = new Map();
+  for (const item of doc.departures || []) {
+    const p = item.stop_point?.designation;
+    if (item.line?.transport_mode !== 'METRO' || !p) continue;
+    if (!map.has(p)) map.set(p, { p, lines: [], dest: [] });
+    const entry = map.get(p);
+    const line = item.line?.designation || '?';
+    if (!entry.lines.includes(line)) entry.lines.push(line);
+    if (item.destination && !entry.dest.includes(item.destination)) entry.dest.push(item.destination);
+  }
+  return [...map.values()].sort((a, b) => a.p.localeCompare(b.p));
+}
+
+// ---- main.cpp: updateDepartures + loop ----
+async function updateDepartures() {
+  lastFetchMs = now();
+  try {
+    stopData = await fetchDepartures();
+    lastFetchOk = true;
+    lastSuccessMs = lastFetchMs;
+    log(`SL OK: ${stopData.stopName || 'site ' + config.site}, spår ${config.platform}` +
+        `${config.line ? ', linje ' + config.line : ''} – ${stopData.departures.length} avgångar`);
+  } catch (e) {
+    lastFetchOk = false;
+    log('SL update failed: ' + e.message);
+  }
+  render();
+}
+
+function tick() {
+  const t = now();
+  if (t - lastFetchMs >= POLL_MS) updateDepartures();
+  if (stopData.departures.length && t - lastSuccessMs >= STALE_MS) {
+    stopData.departures = [];
+    log('Avgångar äldre än 3 min – rensar skylten');
+    render();
+  }
+  renderStatusBar();
+}
+
+function renderStatusBar() {
+  const t = now();
+  const status = document.createElement('span');
+  status.className = lastFetchOk ? 'ok' : 'bad';
+  status.textContent = '● ' + tr(lastFetchOk ? 'slOk' : 'slFail');
+  $('fetchStatus').replaceChildren(status);
+  $('lastFetch').textContent = lastSuccessMs ? tr('lastFetch').replace('{s}', Math.round((t - lastSuccessMs) / 1000)) : '';
+  $('nextFetch').textContent = tr('nextFetch').replace('{s}', Math.max(0, Math.ceil((POLL_MS - (t - lastFetchMs)) / 1000)));
+}
+
+// ---- Language (same texts as the ESP32 setup page; the panel itself stays Swedish) ----
+const T = {
+  sv: { title: 'Perrongskylt', sub: '128×32 HUB75-panel med samma typsnitt, layout och SL-logik som ESP32-firmwaren. Data hämtas live från SL Transport.',
+        hDisplay: 'Visning', station: 'Station', stationHelp: 'Stationen vars avgångar visas på skylten.',
+        platform: 'Spår och riktning', platformHelp: 'Varje spår är en riktning. Listan visar vart tågen från spåret går.',
+        line: 'Linje', lineHelp: 'Visa alla linjer som stannar vid spåret, eller bara en.',
+        rows: 'Synliga avgångar', rowsHelp: 'Hur många tåg skylten visar samtidigt.', row1: '1 rad', row2: '2 rader',
+        brightness: 'Ljusstyrka', brightnessHelp: 'Panelens ljusstyrka. Högre värde drar mer ström.',
+        hTest: 'Testa felfall', fetchNow: 'Hämta nu', offlineOn: 'Simulera Wi-Fi-avbrott', offlineOff: 'Återställ Wi-Fi', skip: 'Hoppa 3 min framåt', hLog: 'Seriell logg',
+        allLines: 'Alla linjer', lineN: 'Linje', platformN: 'Spår', toward: 'mot', loading: 'Laddar spår…',
+        noPlatforms: 'Inga tunnelbaneavgångar just nu – välj spår manuellt.', platformsError: 'Kunde inte hämta spår: ',
+        slOk: 'SL ansluten', slFail: 'Ingen kontakt med SL', lastFetch: 'Senast lyckad hämtning: {s} s sedan', nextFetch: 'Nästa hämtning om {s} s' },
+  en: { title: 'Platform board', sub: '128×32 HUB75 panel with the same font, layout and SL logic as the ESP32 firmware. Data comes live from SL Transport.',
+        hDisplay: 'Display', station: 'Station', stationHelp: 'The station whose departures are shown on the board.',
+        platform: 'Platform and direction', platformHelp: 'Each platform is one direction. The list shows where trains from that platform go.',
+        line: 'Line', lineHelp: 'Show every line that stops at the platform, or just one.',
+        rows: 'Visible departures', rowsHelp: 'How many trains the board shows at once.', row1: '1 row', row2: '2 rows',
+        brightness: 'Brightness', brightnessHelp: 'Panel brightness. Higher values draw more power.',
+        hTest: 'Test failure cases', fetchNow: 'Fetch now', offlineOn: 'Simulate Wi-Fi outage', offlineOff: 'Restore Wi-Fi', skip: 'Jump 3 min ahead', hLog: 'Serial log',
+        allLines: 'All lines', lineN: 'Line', platformN: 'Platform', toward: 'toward', loading: 'Loading platforms…',
+        noPlatforms: 'No metro departures right now – pick a platform manually.', platformsError: 'Could not load platforms: ',
+        slOk: 'SL connected', slFail: 'No contact with SL', lastFetch: 'Last successful fetch: {s} s ago', nextFetch: 'Next fetch in {s} s' },
+  es: { title: 'Panel del andén', sub: 'Panel HUB75 de 128×32 con la misma fuente, disposición y lógica de SL que el firmware del ESP32. Los datos llegan en directo de SL Transport.',
+        hDisplay: 'Pantalla', station: 'Estación', stationHelp: 'La estación cuyas salidas se muestran en el panel.',
+        platform: 'Andén y dirección', platformHelp: 'Cada andén es una dirección. La lista indica hacia dónde van los trenes de ese andén.',
+        line: 'Línea', lineHelp: 'Muestra todas las líneas que paran en el andén, o solo una.',
+        rows: 'Salidas visibles', rowsHelp: 'Cuántos trenes muestra el panel a la vez.', row1: '1 fila', row2: '2 filas',
+        brightness: 'Brillo', brightnessHelp: 'Brillo del panel. Un valor más alto consume más corriente.',
+        hTest: 'Probar fallos', fetchNow: 'Actualizar ahora', offlineOn: 'Simular corte de Wi-Fi', offlineOff: 'Restaurar Wi-Fi', skip: 'Avanzar 3 min', hLog: 'Registro serie',
+        allLines: 'Todas las líneas', lineN: 'Línea', platformN: 'Andén', toward: 'hacia', loading: 'Cargando andenes…',
+        noPlatforms: 'No hay salidas de metro ahora mismo; elige el andén a mano.', platformsError: 'No se pudieron cargar los andenes: ',
+        slOk: 'Conectado a SL', slFail: 'Sin conexión con SL', lastFetch: 'Última descarga correcta: hace {s} s', nextFetch: 'Próxima descarga en {s} s' },
+};
+let lang = 'sv';
+try { lang = localStorage.getItem('lang') || ''; } catch (e) {}
+if (!T[lang]) { const n = (navigator.language || '').slice(0, 2); lang = T[n] ? n : 'sv'; }
+const tr = key => T[lang][key] || T.sv[key];
+let platformState = 'loading', platformError = '';
+
+function applyLang() {
+  document.documentElement.lang = lang;
+  $('lang').value = lang;
+  document.querySelectorAll('[data-t]').forEach(e => { e.textContent = tr(e.dataset.t); });
+  $('offline').textContent = tr(offline ? 'offlineOff' : 'offlineOn');
+  renderPlatforms();
+  renderStatusBar();
+}
+$('lang').onchange = () => {
+  lang = $('lang').value;
+  try { localStorage.setItem('lang', lang); } catch (e) {}
+  applyLang();
+};
+
+// ---- Settings UI (same flow as the ESP32 setup page, applied live) ----
+function option(select, value, text) {
+  const o = document.createElement('option'); o.value = value; o.textContent = text; select.appendChild(o);
+}
+function fillLines() {
+  const p = platforms.find(x => x.p === $('platform').value);
+  $('line').replaceChildren(); option($('line'), '', tr('allLines'));
+  (p ? p.lines : []).forEach(l => option($('line'), l, tr('lineN') + ' ' + l));
+  $('line').value = config.line && [...$('line').options].some(o => o.value === config.line) ? config.line : '';
+}
+function renderPlatforms() {
+  const sel = $('platform');
+  sel.replaceChildren();
+  $('platformWarn').textContent = '';
+  if (platformState === 'loading') { option(sel, '', tr('loading')); sel.disabled = true; fillLines(); return; }
+  platforms.forEach(p => option(sel, p.p, `${tr('platformN')} ${p.p} · ${tr('toward')} ${p.dest.slice(0, 3).join(', ')}`));
+  if (!platforms.length) {
+    for (let i = 1; i <= 4; i++) option(sel, String(i), tr('platformN') + ' ' + i);
+    $('platformWarn').textContent = platformError ? tr('platformsError') + platformError : tr('noPlatforms');
+  }
+  if (![...sel.options].some(o => o.value === config.platform)) config.platform = sel.options[0].value;
+  sel.value = config.platform;
+  sel.disabled = false;
+  fillLines();
+}
+async function loadPlatforms() {
+  platformState = 'loading'; platformError = ''; renderPlatforms();
+  try {
+    platforms = await fetchPlatforms(config.site);
+  } catch (e) {
+    platforms = [];
+    platformError = e.message;
+  }
+  platformState = 'ready';
+  renderPlatforms();
+}
+function applySource() {
+  stopData = { departures: [], stopName: '' };
+  render();
+  updateDepartures();
+}
+
+STATIONS.split(';').map(s => s.split('|')).sort((a, b) => a[1].localeCompare(b[1], 'sv'))
+  .forEach(([id, name]) => option($('site'), id, name));
+$('site').value = config.site;
+
+$('site').onchange = async () => {
+  config.site = Number($('site').value); config.platform = ''; config.line = '';
+  await loadPlatforms(); applySource();
+};
+$('platform').onchange = () => { config.platform = $('platform').value; config.line = ''; fillLines(); applySource(); };
+$('line').onchange = () => { config.line = $('line').value; applySource(); };
+$('rows').onchange = () => { config.rows = Number($('rows').value); render(); };
+$('brightness').oninput = () => { config.brightness = Number($('brightness').value); $('brightnessValue').value = config.brightness; paint(); };
+$('fetchNow').onclick = () => updateDepartures();
+$('offline').onclick = () => {
+  offline = !offline;
+  $('offline').setAttribute('aria-pressed', offline);
+  $('offline').textContent = tr(offline ? 'offlineOff' : 'offlineOn');
+  log(offline ? 'Wi-Fi frånkopplat (simulerat)' : 'Wi-Fi connected (simulerat)');
+  if (!offline) updateDepartures();  // main.cpp fetches immediately on reconnect
+};
+$('skip').onclick = () => { clockOffset += STALE_MS; log('Klockan +3 min'); tick(); };
+
+applyLang();
+render();
+requestAnimationFrame(animate);
+loadPlatforms().then(() => { updateDepartures(); setInterval(tick, 1000); });
+</script>
+</body>
+</html>
